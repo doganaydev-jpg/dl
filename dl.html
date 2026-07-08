@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Görseller indiriliyor</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    font-family: 'Inter','Open Sans',system-ui,sans-serif; background: #17171c; color: #cfcfd6;
+  }
+  .card {
+    width: 100%; max-width: 460px; margin: 20px; padding: 32px 28px;
+    background: #1f1f27; border: 1px solid #2e2e38; border-radius: 14px;
+    box-shadow: 0 10px 40px rgba(0,0,0,.45); text-align: center;
+  }
+  h1 { margin: 0 0 6px; font-size: 20px; color: #f4f4f7; }
+  p.sub { margin: 0 0 22px; font-size: 14px; color: #9a9aa6; }
+  #status { font-size: 15px; margin: 18px 0; min-height: 22px; }
+  .bar { height: 8px; background: #15151a; border-radius: 6px; overflow: hidden; margin: 14px 0 22px; }
+  .bar > i { display: block; height: 100%; width: 0; background: #ff7a1a; transition: width .25s ease; }
+  button {
+    width: 100%; padding: 13px 18px; font-size: 15px; font-weight: 600; cursor: pointer;
+    color: #fff; background: #ff7a1a; border: none; border-radius: 9px; transition: opacity .2s, background .2s;
+  }
+  button:hover:not(:disabled) { background: #ff8c33; }
+  button:disabled { opacity: .5; cursor: default; }
+  .links { margin-top: 18px; text-align: left; display: none; }
+  .links a { display: block; color: #ff9c4d; text-decoration: none; padding: 7px 0; border-bottom: 1px solid #2e2e38; font-size: 14px; word-break: break-all; }
+  .err { color: #ff6d5a; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>Görseller hazırlanıyor</h1>
+    <p class="sub">Dosyalar doğrudan CDN'den indirilip tek ZIP'te birleştiriliyor.</p>
+    <div class="bar"><i id="pbar"></i></div>
+    <div id="status">Başlatılıyor…</div>
+    <button id="dlBtn" disabled>⬇️ ZIP indir</button>
+    <div class="links" id="links"></div>
+  </div>
+<script>
+(function () {
+  var statusEl = document.getElementById('status');
+  var barEl = document.getElementById('pbar');
+  var btn = document.getElementById('dlBtn');
+  var linksEl = document.getElementById('links');
+
+  function setBar(done, total) { barEl.style.width = total ? Math.round(done / total * 100) + '%' : '0'; }
+  function fail(msg, files) {
+    statusEl.innerHTML = '<span class="err">Hata: ' + msg + '</span>';
+    if (files && files.length) {
+      linksEl.style.display = 'block';
+      linksEl.innerHTML = '<div style="color:#9a9aa6;font-size:13px;margin-bottom:6px">Dosyaları tek tek indirebilirsiniz:</div>';
+      files.forEach(function (f) {
+        var a = document.createElement('a');
+        a.href = f.url; a.textContent = f.name; a.target = '_blank'; a.rel = 'noopener';
+        linksEl.appendChild(a);
+      });
+    }
+  }
+
+  // --- CRC32 ---
+  var crcTable = (function () { var t = new Uint32Array(256); for (var n = 0; n < 256; n++) { var c = n; for (var k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1); t[n] = c >>> 0; } return t; })();
+  function crc32(u8) { var c = 0xFFFFFFFF; for (var i = 0; i < u8.length; i++) c = crcTable[(c ^ u8[i]) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; }
+
+  // --- PNG metadata strip (aynı chunk whitelist; workflow'un finalizasyonuyla birebir) ---
+  var KEEP = { IHDR: 1, PLTE: 1, IDAT: 1, IEND: 1, tRNS: 1, gAMA: 1, cHRM: 1, sRGB: 1, iCCP: 1, bKGD: 1, pHYs: 1, sBIT: 1, hIST: 1 };
+  var SIG = [137, 80, 78, 71, 13, 10, 26, 10];
+  function stripPng(u8) {
+    if (u8.length < 8) return u8;
+    for (var i = 0; i < 8; i++) if (u8[i] !== SIG[i]) return u8; // PNG değilse dokunma
+    var dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+    var parts = [u8.subarray(0, 8)]; var pos = 8;
+    while (pos + 8 <= u8.length) {
+      var len = dv.getUint32(pos);
+      var type = String.fromCharCode(u8[pos + 4], u8[pos + 5], u8[pos + 6], u8[pos + 7]);
+      var end = pos + 12 + len;
+      if (end > u8.length) break;
+      if (KEEP[type]) parts.push(u8.subarray(pos, end));
+      if (type === 'IEND') break;
+      pos = end;
+    }
+    var total = 0; for (var j = 0; j < parts.length; j++) total += parts[j].length;
+    var out = new Uint8Array(total); var o = 0;
+    for (var m = 0; m < parts.length; m++) { out.set(parts[m], o); o += parts[m].length; }
+    return out;
+  }
+
+  // --- store-only ZIP writer (PNG'ler zaten sıkışık; UTF-8 dosya adı bayrağı set) ---
+  function buildZip(entries) {
+    var enc = new TextEncoder();
+    var chunks = [], central = [], offset = 0;
+    for (var i = 0; i < entries.length; i++) {
+      var nameBytes = enc.encode(entries[i].name);
+      var data = entries[i].data;
+      var crc = crc32(data), size = data.length;
+      var lh = new DataView(new ArrayBuffer(30));
+      lh.setUint32(0, 0x04034b50, true); lh.setUint16(4, 20, true); lh.setUint16(6, 0x0800, true);
+      lh.setUint16(8, 0, true); lh.setUint16(10, 0, true); lh.setUint16(12, 0, true);
+      lh.setUint32(14, crc, true); lh.setUint32(18, size, true); lh.setUint32(22, size, true);
+      lh.setUint16(26, nameBytes.length, true); lh.setUint16(28, 0, true);
+      chunks.push(new Uint8Array(lh.buffer)); chunks.push(nameBytes); chunks.push(data);
+      var cd = new DataView(new ArrayBuffer(46));
+      cd.setUint32(0, 0x02014b50, true); cd.setUint16(4, 20, true); cd.setUint16(6, 20, true);
+      cd.setUint16(8, 0x0800, true); cd.setUint16(10, 0, true); cd.setUint16(12, 0, true); cd.setUint16(14, 0, true);
+      cd.setUint32(16, crc, true); cd.setUint32(20, size, true); cd.setUint32(24, size, true);
+      cd.setUint16(28, nameBytes.length, true); cd.setUint16(30, 0, true); cd.setUint16(32, 0, true);
+      cd.setUint16(34, 0, true); cd.setUint16(36, 0, true); cd.setUint32(38, 0, true); cd.setUint32(42, offset, true);
+      central.push({ header: new Uint8Array(cd.buffer), name: nameBytes });
+      offset += 30 + nameBytes.length + size;
+    }
+    var centralStart = offset, centralSize = 0;
+    for (var c = 0; c < central.length; c++) { chunks.push(central[c].header); chunks.push(central[c].name); centralSize += central[c].header.length + central[c].name.length; }
+    var eo = new DataView(new ArrayBuffer(22));
+    eo.setUint32(0, 0x06054b50, true); eo.setUint16(4, 0, true); eo.setUint16(6, 0, true);
+    eo.setUint16(8, entries.length, true); eo.setUint16(10, entries.length, true);
+    eo.setUint32(12, centralSize, true); eo.setUint32(16, centralStart, true); eo.setUint16(20, 0, true);
+    chunks.push(new Uint8Array(eo.buffer));
+    return new Blob(chunks, { type: 'application/zip' });
+  }
+
+  function parseHash() {
+    var h = location.hash.slice(1);
+    if (!h) throw new Error('İndirme verisi bulunamadı (bağlantı eksik).');
+    var binStr = atob(decodeURIComponent(h));
+    var bytes = new Uint8Array(binStr.length);
+    for (var i = 0; i < binStr.length; i++) bytes[i] = binStr.charCodeAt(i);
+    return JSON.parse(new TextDecoder().decode(bytes));
+  }
+
+  var payload, blobUrl = null, zipName = 'gorseller.zip';
+  try { payload = parseHash(); } catch (e) { fail(e.message); return; }
+  var files = (payload && payload.files) || [];
+  zipName = (payload && payload.zip) || zipName;
+  if (!files.length) { fail('İndirilecek dosya yok.'); return; }
+
+  (async function prepare() {
+    var entries = [];
+    try {
+      for (var i = 0; i < files.length; i++) {
+        statusEl.textContent = 'İndiriliyor ' + (i + 1) + '/' + files.length + '…';
+        setBar(i, files.length);
+        var r = await fetch(files[i].url);
+        if (!r.ok) throw new Error(files[i].name + ' → ' + r.status + ' (bağlantı süresi dolmuş olabilir)');
+        var ab = await r.arrayBuffer();
+        entries.push({ name: files[i].name, data: stripPng(new Uint8Array(ab)) });
+      }
+      setBar(files.length, files.length);
+      statusEl.textContent = 'ZIP hazırlanıyor…';
+      var blob = buildZip(entries);
+      blobUrl = URL.createObjectURL(blob);
+      statusEl.textContent = files.length + ' görsel hazır. İndirmek için butona basın.';
+      btn.disabled = false;
+      btn.focus();
+      // otomatik denemesi (bazı tarayıcılar jest ister; buton yedek)
+      try { triggerDownload(); } catch (e) {}
+    } catch (e) {
+      fail(e.message, files);
+    }
+  })();
+
+  function triggerDownload() {
+    if (!blobUrl) return;
+    var a = document.createElement('a');
+    a.href = blobUrl; a.download = zipName;
+    document.body.appendChild(a); a.click(); a.remove();
+    statusEl.textContent = 'İndirildi ✅ — ' + zipName;
+  }
+  btn.addEventListener('click', triggerDownload);
+})();
+</script>
+</body>
+</html>
