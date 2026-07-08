@@ -122,17 +122,21 @@
     return new Blob(chunks, { type: 'application/zip' });
   }
 
-  function parseHash() {
-    var h = location.hash.slice(1);
-    if (!h) throw new Error('İndirme verisi bulunamadı (bağlantı eksik).');
-    var binStr = atob(decodeURIComponent(h));
+  function readPayload() {
+    // ?d=<base64url> (redirect'te güvenli); geriye dönük olarak #hash da desteklenir
+    var raw = new URLSearchParams(location.search).get('d');
+    if (!raw && location.hash) raw = decodeURIComponent(location.hash.slice(1));
+    if (!raw) throw new Error('İndirme verisi bulunamadı (bağlantı eksik).');
+    var s = raw.replace(/-/g, '+').replace(/_/g, '/');
+    while (s.length % 4) s += '=';
+    var binStr = atob(s);
     var bytes = new Uint8Array(binStr.length);
     for (var i = 0; i < binStr.length; i++) bytes[i] = binStr.charCodeAt(i);
     return JSON.parse(new TextDecoder().decode(bytes));
   }
 
   var payload, blobUrl = null, zipName = 'gorseller.zip';
-  try { payload = parseHash(); } catch (e) { fail(e.message); return; }
+  try { payload = readPayload(); } catch (e) { fail(e.message); return; }
   var files = (payload && payload.files) || [];
   zipName = (payload && payload.zip) || zipName;
   if (!files.length) { fail('İndirilecek dosya yok.'); return; }
