@@ -30,6 +30,12 @@
   .links { margin-top: 18px; text-align: left; display: none; }
   .links a { display: block; color: #ff9c4d; text-decoration: none; padding: 7px 0; border-bottom: 1px solid #2e2e38; font-size: 14px; word-break: break-all; }
   .err { color: #ff6d5a; }
+  a.back {
+    display: inline-block; margin-top: 16px; padding: 11px 18px; font-size: 14px; font-weight: 600;
+    color: #f4f4f7; background: #2e2e38; border: 1px solid #3a3a46; border-radius: 9px;
+    text-decoration: none; transition: background .2s;
+  }
+  a.back:hover { background: #3a3a46; }
 </style>
 </head>
 <body>
@@ -40,6 +46,7 @@
     <div id="status">Başlatılıyor…</div>
     <button id="dlBtn" disabled>⬇️ ZIP indir</button>
     <div class="links" id="links"></div>
+    <a id="backBtn" class="back" href="#">← Forma dön</a>
   </div>
 <script>
 (function () {
@@ -47,6 +54,16 @@
   var barEl = document.getElementById('pbar');
   var btn = document.getElementById('dlBtn');
   var linksEl = document.getElementById('links');
+  var backBtn = document.getElementById('backBtn');
+
+  // Forma geri don: payload.back varsa oraya git (n8n ileride form URL'i gecebilir), yoksa tarayici gecmisinde geri don.
+  if (backBtn) backBtn.addEventListener('click', function (e) {
+    e.preventDefault();
+    var back = (payload && payload.back) ? payload.back : null;
+    if (back) window.location.href = back;
+    else if (history.length > 1) history.back();
+    else window.history.go(-1);
+  });
 
   function setBar(done, total) { barEl.style.width = total ? Math.round(done / total * 100) + '%' : '0'; }
   function fail(msg, files) {
